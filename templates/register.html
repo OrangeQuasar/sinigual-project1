@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div class="auth-form">
+        <h2>新規登録</h2>
+        <form method="post">
+            <p>
+                <label for="username">ユーザー名</label>
+                <input type="text" name="username" id="username" placeholder="ユーザー名" required>
+            </p>
+            <p>
+                <label for="password">パスワード</label>
+                <input type="password" name="password" id="password" placeholder="パスワード" required>
+            </p>
+            <p>
+                <button type="submit">登録する</button>
+            </p>
+        </form>
+        <p>すでにアカウントをお持ちですか？ <a href="{{ url_for('login') }}">ログイン</a></p>
+    </div>
+{% endblock %}

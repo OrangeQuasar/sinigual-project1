@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="pdf-gallery">
+    <h2>みんなのチラシ</h2>
+    <div class="pdf-grid">
+        {% for pdf in pdfs %}
+        <div class="pdf-card">
+            <a href="#" class="pdf-thumbnail" data-filename="{{ pdf.filename }}">
+                {% if pdf.thumbnail_filename %}
+                    <img src="{{ url_for('static', filename='thumbnails/' + pdf.thumbnail_filename) }}" alt="{{ pdf.title }}のサムネイル">
+                {% else %}
+                    <img src="https://placehold.jp/150x212.png?text=No+Image" alt="No Image">
+                {% endif %}
+                <h3>{{ pdf.title }}</h3>
+                <p>投稿者: {{ pdf.username }}</p>
+            </a>
+        </div>
+        {% else %}
+        <p>まだチラシが投稿されていません。</p>
+        {% endfor %}
+    </div>
+</section>
+
+<div id="pdf-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <div class="pdf-viewer-controls">
+            <button id="prev-page">＜ 前へ</button>
+            <span id="page-info"></span>
+            <button id="next-page">次へ ＞</button>
+        </div>
+        <canvas id="pdf-canvas"></canvas>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+    // PDF.jsライブラリをインポート
+    const { pdfjsLib } = globalThis;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "{{ url_for('static', filename='pdfjs/build/pdf.worker.mjs') }}";
+
+    // 要素を取得
+    const modal = document.getElementById('pdf-modal');
+    const canvas = document.getElementById('pdf-canvas');
+    const closeButton = document.querySelector('.close-button');
+    const prevButton = document.getElementById('prev-page');
+    const nextButton = document.getElementById('next-page');
+    const pageInfo = document.getElementById('page-info');
+
+    // PDFの状態を管理する変数
+    let currentPdf = null;
+    let currentPageNum = 1;
+    let totalPages = 0;
+
+    // PDFを読み込んで描画するメイン関数
+    function loadAndRenderPdf(url) {
+        const cMapUrl = "{{ url_for('static', filename='pdfjs/web/cmaps/') }}/";
+        const loadingTask = pdfjsLib.getDocument({ url, cMapUrl, cMapPacked: true });
+
+        loadingTask.promise.then(pdf => {
+            currentPdf = pdf;
+            totalPages = pdf.numPages;
+            currentPageNum = 1;
+            renderPage(currentPageNum);
+        });
+    }
+
+    // 特定のページを描画する関数
+    function renderPage(pageNum) {
+        currentPdf.getPage(pageNum).then(page => {
+            const viewport = page.getViewport({ scale: 1.5 });
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            page.render({ canvasContext: context, viewport: viewport });
+            
+            // ページ情報を更新
+            pageInfo.textContent = `ページ ${pageNum} / ${totalPages}`;
+
+            // ボタンの有効/無効を切り替え
+            prevButton.disabled = (pageNum <= 1);
+            nextButton.disabled = (pageNum >= totalPages);
+        });
+    }
+
+    // --- イベントリスナー ---
+    document.querySelectorAll('.pdf-thumbnail').forEach(thumbnail => {
+        thumbnail.addEventListener('click', event => {
+            event.preventDefault();
+            const filename = thumbnail.dataset.filename;
+            const pdfUrl = `{{ url_for('uploaded_file', filename='') }}${filename}`;
+            modal.style.display = 'flex';
+            loadAndRenderPdf(pdfUrl);
+        });
+    });
+
+    closeButton.addEventListener('click', () => modal.style.display = 'none');
+    window.addEventListener('click', event => {
+        if (event.target == modal) modal.style.display = 'none';
+    });
+
+    prevButton.addEventListener('click', () => {
+        if (currentPageNum > 1) {
+            currentPageNum--;
+            renderPage(currentPageNum);
+        }
+    });
+
+    nextButton.addEventListener('click', () => {
+        if (currentPageNum < totalPages) {
+            currentPageNum++;
+            renderPage(currentPageNum);
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="upload-form">
+        <h2>PDFをアップロード</h2>
+        <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+            <input type="text" name="title" placeholder="タイトル" required>
+            <input type="file" name="file" accept="application/pdf" required>
+            <button type="submit">アップロード</button>
+        </form>
+    </section>
+
+    <hr>
+
+    <section class="my-pdfs">
+        <h2>あなたがアップロードしたPDF</h2>
+        <ul>
+            {% for pdf in user_pdfs %}
+                <li>
+                    {{ pdf.title }} ({{ pdf.filename }})
+                    </li>
+            {% else %}
+                <li>まだPDFをアップロードしていません。</li>
+            {% endfor %}
+        </ul>
+    </section>
+{% endblock %}

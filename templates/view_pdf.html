@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Viewer</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+        #pdf-container { width: 100%; height: 100vh; }
+    </style>
+    <script type="module" src="{{ url_for('static', filename='pdfjs/build/pdf.mjs') }}"></script>
+</head>
+<body>
+    <div id="pdf-container">
+        <canvas id="pdf-canvas"></canvas>
+    </div>
+
+    <script type="module">
+        // Import the pdfjsLib object from the module
+        const { pdfjsLib } = globalThis;
+
+        // Set the path for the worker script
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "{{ url_for('static', filename='pdfjs/build/pdf.worker.mjs') }}";
+        
+        const pdfUrl = "{{ url_for('uploaded_file', filename=filename) }}";
+        const canvas = document.getElementById('pdf-canvas');
+        const ctx = canvas.getContext('2d');
+        const cMapUrl = "{{ url_for('static', filename='pdfjs/web/cmaps/') }}/";
+
+        const loadingTask = pdfjsLib.getDocument({
+            url: pdfUrl,
+            cMapUrl: cMapUrl,
+            cMapPacked: true,
+        });
+
+        loadingTask.promise.then(pdf => {
+            console.log('PDF loaded from local module!');
+            
+            pdf.getPage(1).then(page => {
+                const viewport = page.getViewport({ scale: 1.5 });
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                const renderContext = {
+                    canvasContext: ctx,
+                    viewport: viewport
+                };
+                page.render(renderContext);
+            });
+        }).catch(err => {
+            console.error('Error while loading PDF: ', err);
+        });
+    </script>
+</body>
+</html>
