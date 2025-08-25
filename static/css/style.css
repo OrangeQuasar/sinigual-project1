@@ -1,65 +1,217 @@
-body { font-family: sans-serif; margin: 0; background-color: #f4f4f4; }
-header { background: #333; color: white; padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
-header h1 a { color: white; text-decoration: none; }
-header nav a { color: white; margin-left: 1rem; }
-main { max-width: 800px; margin: 2rem auto; padding: 1rem; background: white; border-radius: 8px; }
-.flashes { list-style: none; padding: 1rem; background: #ffefef; border: 1px solid #e0b4b4; margin-bottom: 1rem; }
-.upload-form, .pdf-list, .auth-form { margin-bottom: 2rem; }
-input[type="text"], input[type="password"] { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; }
-button { padding: 10px 15px; background: #333; color: white; border: none; cursor: pointer; }
-.pdf-list ul { list-style: none; padding: 0; }
-.pdf-list li { border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 5px; }
-.pdf-list li a { text-decoration: none; color: #333; }
-.pdf-list li h3 { margin-top: 0; }
-/* ... 既存のスタイル ... */
+/* --- 基本スタイル --- */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    background-color: #f4f7f6;
+    color: #333;
+}
 
-/* PDFギャラリーのスタイル */
+header {
+    background: #ffffff;
+    color: #333;
+    padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+header h1 a {
+    color: #333;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+header nav a {
+    color: #555;
+    margin-left: 1.5rem;
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+header nav a:hover {
+    color: #007bff;
+}
+
+main {
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 2rem;
+    background: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+
+.flashes {
+    list-style: none;
+    padding: 1rem;
+    background: #fff3cd;
+    border: 1px solid #ffeeba;
+    color: #856404;
+    border-radius: 5px;
+    margin-bottom: 1.5rem;
+}
+
+/* --- フォームスタイル --- */
+.upload-form, .auth-form {
+    margin-bottom: 2rem;
+}
+
+input[type="text"], input[type="password"], input[type="file"] {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 15px;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+button {
+    padding: 10px 20px;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background: #0056b3;
+}
+
+/* --- PDFギャラリー --- */
 .pdf-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 25px;
 }
+
 .pdf-card {
-    border: 1px solid #ddd;
+    border: 1px solid #e0e0e0;
     border-radius: 8px;
-    padding: 10px;
+    padding: 15px;
     text-align: center;
-    transition: box-shadow 0.3s;
+    transition: box-shadow 0.3s, transform 0.3s;
+    background: #fff;
 }
+
 .pdf-card:hover {
-    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    transform: translateY(-5px);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
 }
-.pdf-card a {
+
+.pdf-card a.pdf-thumbnail {
     text-decoration: none;
     color: inherit;
+    display: block;
 }
+
 .pdf-card img {
-    max-width: 100%;
+    width: 100%;
     height: auto;
+    aspect-ratio: 150 / 212;
+    object-fit: cover;
+    border-radius: 4px;
     margin-bottom: 10px;
+    background: #eee;
 }
+
 .pdf-card h3 {
     margin: 0 0 5px 0;
-    font-size: 1em;
+    font-size: 1.1em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
+
 .pdf-card p {
     margin: 0;
-    font-size: 0.8em;
+    font-size: 0.9em;
     color: #666;
 }
 
+/* --- リアクション --- */
+.reactions-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #eee;
+}
+.reactions {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    flex-grow: 1;
+}
+.reaction-emoji {
+    background-color: #f0f2f5;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    border: 1px solid transparent;
+}
+.reaction-emoji.user-reacted {
+    background-color: #e7f3ff;
+    border-color: #007bff;
+}
+.reaction-count {
+    font-weight: bold;
+    margin-left: 3px;
+    color: #333;
+}
+.add-reaction {
+    position: relative;
+    margin-left: 10px;
+}
+.add-reaction-btn {
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    border: 1px solid #ccc;
+    cursor: pointer;
+    background: #f0f2f5;
+    font-size: 1.2em;
+    line-height: 24px;
+}
+.emoji-picker {
+    display: none;
+    position: absolute;
+    bottom: 35px;
+    right: 0;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 100;
+}
+.emoji-picker span {
+    padding: 5px;
+    cursor: pointer;
+    font-size: 1.5em;
+    transition: transform 0.2s;
+}
+.emoji-picker span:hover {
+    transform: scale(1.2);
+}
 
-/* モーダルのスタイル */
+/* --- PDFモーダルビューワー --- */
 .modal {
-    display: none; /* 初期状態では非表示 */
-    position: fixed; /* 画面に固定 */
-    z-index: 1000; /* 最前面に表示 */
+    display: none;
+    position: fixed;
+    z-index: 1000;
     left: 0;
     top: 0;
     width: 100%;
     height: 100%;
-    overflow: auto; /* スクロール可能に */
-    background-color: rgba(0,0,0,0.8); /* 半透明の黒い背景 */
+    overflow: auto;
+    background-color: rgba(0,0,0,0.85);
     justify-content: center;
     align-items: center;
 }
@@ -94,10 +246,8 @@ button { padding: 10px 15px; background: #333; color: white; border: none; curso
 .close-button:hover,
 .close-button:focus {
     color: black;
-    text-decoration: none;
 }
 
-/* style.css に追加 */
 .pdf-viewer-controls {
     text-align: center;
     margin-bottom: 15px;
@@ -105,16 +255,20 @@ button { padding: 10px 15px; background: #333; color: white; border: none; curso
     padding: 8px;
     border-radius: 5px;
 }
+
 .pdf-viewer-controls button {
     padding: 5px 15px;
     font-size: 1em;
     cursor: pointer;
 }
+
 .pdf-viewer-controls button:disabled {
     cursor: not-allowed;
     opacity: 0.5;
 }
+
 .pdf-viewer-controls span {
     margin: 0 15px;
     font-weight: bold;
+    vertical-align: middle;
 }

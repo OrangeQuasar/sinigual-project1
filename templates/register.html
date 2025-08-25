@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-
 {% block content %}
     <div class="auth-form">
         <h2>新規登録</h2>
@@ -11,6 +10,10 @@
             <p>
                 <label for="password">パスワード</label>
                 <input type="password" name="password" id="password" placeholder="パスワード" required>
+            </p>
+            <p>
+                <label for="password_confirm">パスワード（確認用）</label>
+                <input type="password" name="password_confirm" id="password_confirm" placeholder="パスワードを再入力" required>
             </p>
             <p>
                 <button type="submit">登録する</button>

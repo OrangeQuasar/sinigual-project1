@@ -5,7 +5,7 @@
     <h2>みんなのチラシ</h2>
     <div class="pdf-grid">
         {% for pdf in pdfs %}
-        <div class="pdf-card">
+        <div class="pdf-card" id="pdf-card-{{ pdf.id }}">
             <a href="#" class="pdf-thumbnail" data-filename="{{ pdf.filename }}">
                 {% if pdf.thumbnail_filename %}
                     <img src="{{ url_for('static', filename='thumbnails/' + pdf.thumbnail_filename) }}" alt="{{ pdf.title }}のサムネイル">
@@ -15,6 +15,26 @@
                 <h3>{{ pdf.title }}</h3>
                 <p>投稿者: {{ pdf.username }}</p>
             </a>
+            <div class="reactions-container">
+                <div class="reactions">
+                    {% for reaction in pdf.reactions %}
+                    <span class="reaction-emoji {% if reaction.emoji in pdf.user_reactions %}user-reacted{% endif %}"
+                          data-pdf-id="{{ pdf.id }}" data-emoji="{{ reaction.emoji }}">
+                        {{ reaction.emoji }} <span class="reaction-count">{{ reaction.count }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                <div class="add-reaction">
+                    <button class="add-reaction-btn" data-pdf-id="{{ pdf.id }}">+</button>
+                    <div class="emoji-picker">
+                        <span data-pdf-id="{{ pdf.id }}" data-emoji="👍">👍</span>
+                        <span data-pdf-id="{{ pdf.id }}" data-emoji="❤️">❤️</span>
+                        <span data-pdf-id="{{ pdf.id }}" data-emoji="😂">😂</span>
+                        <span data-pdf-id="{{ pdf.id }}" data-emoji="🎉">🎉</span>
+                        <span data-pdf-id="{{ pdf.id }}" data-emoji="🤔">🤔</span>
+                    </div>
+                </div>
+            </div>
         </div>
         {% else %}
         <p>まだチラシが投稿されていません。</p>
@@ -22,6 +42,7 @@
     </div>
 </section>
 
+<!-- PDF表示用のモーダル -->
 <div id="pdf-modal" class="modal">
     <div class="modal-content">
         <span class="close-button">&times;</span>
@@ -37,11 +58,12 @@
 
 {% block scripts %}
 <script type="module">
-    // PDF.jsライブラリをインポート
-    const { pdfjsLib } = globalThis;
+    // import文を使って、pdf.mjsモジュールからpdfjsLibを直接インポートします
+    import * as pdfjsLib from "{{ url_for('static', filename='pdfjs/build/pdf.mjs') }}";
+
+    // --- PDFビューワー処理 ---
     pdfjsLib.GlobalWorkerOptions.workerSrc = "{{ url_for('static', filename='pdfjs/build/pdf.worker.mjs') }}";
 
-    // 要素を取得
     const modal = document.getElementById('pdf-modal');
     const canvas = document.getElementById('pdf-canvas');
     const closeButton = document.querySelector('.close-button');
@@ -49,12 +71,10 @@
     const nextButton = document.getElementById('next-page');
     const pageInfo = document.getElementById('page-info');
 
-    // PDFの状態を管理する変数
     let currentPdf = null;
     let currentPageNum = 1;
     let totalPages = 0;
 
-    // PDFを読み込んで描画するメイン関数
     function loadAndRenderPdf(url) {
         const cMapUrl = "{{ url_for('static', filename='pdfjs/web/cmaps/') }}/";
         const loadingTask = pdfjsLib.getDocument({ url, cMapUrl, cMapPacked: true });
@@ -67,7 +87,6 @@
         });
     }
 
-    // 特定のページを描画する関数
     function renderPage(pageNum) {
         currentPdf.getPage(pageNum).then(page => {
             const viewport = page.getViewport({ scale: 1.5 });
@@ -77,16 +96,12 @@
             
             page.render({ canvasContext: context, viewport: viewport });
             
-            // ページ情報を更新
             pageInfo.textContent = `ページ ${pageNum} / ${totalPages}`;
-
-            // ボタンの有効/無効を切り替え
             prevButton.disabled = (pageNum <= 1);
             nextButton.disabled = (pageNum >= totalPages);
         });
     }
 
-    // --- イベントリスナー ---
     document.querySelectorAll('.pdf-thumbnail').forEach(thumbnail => {
         thumbnail.addEventListener('click', event => {
             event.preventDefault();
@@ -103,17 +118,68 @@
     });
 
     prevButton.addEventListener('click', () => {
-        if (currentPageNum > 1) {
-            currentPageNum--;
-            renderPage(currentPageNum);
-        }
+        if (currentPageNum > 1) renderPage(--currentPageNum);
     });
 
     nextButton.addEventListener('click', () => {
-        if (currentPageNum < totalPages) {
-            currentPageNum++;
-            renderPage(currentPageNum);
+        if (currentPageNum < totalPages) renderPage(++currentPageNum);
+    });
+
+    // --- リアクション処理 ---
+    document.addEventListener('click', function(e) {
+        if (e.target.classList.contains('add-reaction-btn')) {
+            const picker = e.target.nextElementSibling;
+            picker.style.display = picker.style.display === 'block' ? 'none' : 'block';
+        } else if (e.target.dataset.emoji && e.target.dataset.pdfId) {
+            const pdfId = e.target.dataset.pdfId;
+            const emoji = e.target.dataset.emoji;
+            
+            const picker = e.target.closest('.emoji-picker');
+            if (picker) picker.style.display = 'none';
+
+            sendReaction(pdfId, emoji);
         }
     });
+
+    async function sendReaction(pdfId, emoji) {
+        const response = await fetch(`/react/${pdfId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ emoji: emoji }),
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            updateReactionUI(pdfId, result.emoji, result.count, result.action);
+        } else {
+            const error = await response.json();
+            alert(error.error || 'リアクションに失敗しました');
+        }
+    }
+
+    function updateReactionUI(pdfId, emoji, count, action) {
+        const card = document.getElementById(`pdf-card-${pdfId}`);
+        const reactionsContainer = card.querySelector('.reactions');
+        let reactionSpan = reactionsContainer.querySelector(`[data-emoji="${emoji}"]`);
+
+        if (count > 0) {
+            if (!reactionSpan) {
+                reactionSpan = document.createElement('span');
+                reactionSpan.className = 'reaction-emoji';
+                reactionSpan.dataset.pdfId = pdfId;
+                reactionSpan.dataset.emoji = emoji;
+                reactionsContainer.appendChild(reactionSpan);
+            }
+            reactionSpan.innerHTML = `${emoji} <span class="reaction-count">${count}</span>`;
+            
+            if (action === 'added') {
+                reactionSpan.classList.add('user-reacted');
+            } else {
+                reactionSpan.classList.remove('user-reacted');
+            }
+        } else {
+            if (reactionSpan) reactionSpan.remove();
+        }
+    }
 </script>
 {% endblock %}
