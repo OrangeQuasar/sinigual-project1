@@ -9,18 +9,18 @@
         </form>
     </section>
 
-    <hr>
+    <hr style="margin: 2rem 0;">
 
     <section class="my-pdfs">
         <h2>あなたがアップロードしたPDF</h2>
-        <ul>
-            {% for pdf in user_pdfs %}
-                <li>
-                    {{ pdf.title }} ({{ pdf.filename }})
-                    </li>
-            {% else %}
-                <li>まだPDFをアップロードしていません。</li>
-            {% endfor %}
-        </ul>
+        {% if user_pdfs %}
+            <ul>
+                {% for pdf in user_pdfs %}
+                    <li>{{ pdf.title }}</li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>まだPDFをアップロードしていません。</p>
+        {% endif %}
     </section>
 {% endblock %}

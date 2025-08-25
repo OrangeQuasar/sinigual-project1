@@ -8,13 +8,22 @@
                 <input type="text" name="username" id="username" placeholder="ユーザー名" required>
             </p>
             <p>
+                <label for="email">メールアドレス</label>
+                <input type="email" name="email" id="email" placeholder="メールアドレス" required>
+            </p>
+            <p>
                 <label for="password">パスワード</label>
                 <input type="password" name="password" id="password" placeholder="パスワード" required>
+                <small class="password-requirements">8文字以上で、英字の大文字、小文字、数字のうち2種類以上を使用してください。</small>
             </p>
             <p>
                 <label for="password_confirm">パスワード（確認用）</label>
                 <input type="password" name="password_confirm" id="password_confirm" placeholder="パスワードを再入力" required>
             </p>
+            <div class="terms-agreement">
+                <input type="checkbox" name="terms" id="terms" required>
+                <label for="terms"><a href="{{ url_for('terms') }}" target="_blank">利用規約</a>に同意します</label>
+            </div>
             <p>
                 <button type="submit">登録する</button>
             </p>

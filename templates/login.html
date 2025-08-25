@@ -3,10 +3,19 @@
     <div class="auth-form">
         <h2>ログイン</h2>
         <form method="post">
-            <input type="text" name="username" placeholder="ユーザー名" required>
-            <input type="password" name="password" placeholder="パスワード" required>
-            <button type="submit">ログイン</button>
+            <p>
+                <label for="username">ユーザー名</label>
+                <input type="text" name="username" id="username" placeholder="ユーザー名" required>
+            </p>
+            <p>
+                <label for="password">パスワード</label>
+                <input type="password" name="password" id="password" placeholder="パスワード" required>
+            </p>
+            <p>
+                <button type="submit">ログイン</button>
+            </p>
         </form>
+        <p><a href="{{ url_for('forgot_password') }}">パスワードを忘れましたか？</a></p>
         <p>アカウントをお持ちでないですか？ <a href="{{ url_for('register') }}">新規登録</a></p>
     </div>
 {% endblock %}
