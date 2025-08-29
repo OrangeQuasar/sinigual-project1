@@ -7,3 +7,7 @@ __pycache__/
 
 # データベースファイルを無視する
 database.db
+
+venv
+uploads
+static/thumbnails
