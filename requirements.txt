@@ -1,0 +1,7 @@
+Flask
+PyMuPDF
+psycopg2-binary
+boto3
+itsdangerous
+python-dotenv
+gunicorn
