@@ -12,6 +12,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired
+import logging
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -21,6 +22,9 @@ mimetypes.add_type('application/javascript', '.mjs')
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a_fallback_secret_key_for_development')
+
+# --- ロギング設定 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]')
 
 # トークン生成用のシリアライザーを初期化
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
@@ -271,9 +275,12 @@ def upload_file():
         return redirect(url_for('account'))
 
     if allowed_file(file.filename):
+        user_id_str = str(session['user_id'])
         file_extension = os.path.splitext(secure_filename(file.filename))[1]
-        filename_uuid = f"{uuid.uuid4().hex}{file_extension}"
-        thumbnail_filename_uuid = f"thumb_{uuid.uuid4().hex}.png"
+        
+        # S3のキー（ファイルパス）を「ユーザーID/UUID」の形式で生成
+        filename_uuid = f"{user_id_str}/{uuid.uuid4().hex}{file_extension}"
+        thumbnail_filename_uuid = f"{user_id_str}/thumb_{uuid.uuid4().hex}.png"
 
         try:
             # サムネイル生成
@@ -289,10 +296,18 @@ def upload_file():
                 s3_client.put_object(Body=thumbnail_bytes, Bucket=S3_BUCKET_THUMBNAILS, Key=thumbnail_filename_uuid, ContentType='image/png')
             else:
                 # 開発用にローカルにも保存する場合
+                # ユーザーごとのディレクトリを作成
+                user_upload_dir = os.path.join('uploads', user_id_str)
+                user_thumb_dir = os.path.join('static/thumbnails', user_id_str)
+                os.makedirs(user_upload_dir, exist_ok=True)
+                os.makedirs(user_thumb_dir, exist_ok=True)
+
                 local_pdf_path = os.path.join('uploads', filename_uuid)
                 local_thumb_path = os.path.join('static/thumbnails', thumbnail_filename_uuid)
+                
                 file.seek(0)
-                file.save(local_pdf_path)
+                with open(local_pdf_path, "wb") as f:
+                    f.write(file.read())
                 with open(local_thumb_path, "wb") as f:
                     f.write(thumbnail_bytes)
 
@@ -456,10 +471,10 @@ def logout():
 def terms():
     return render_template('terms.html')
 
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
+@app.route('/uploads/<path:filepath>')
+def uploaded_file(filepath):
     # 本番環境ではS3から直接配信されるため、このルートは開発用
-    return send_from_directory('uploads', filename)
+    return send_from_directory('uploads', filepath)
 
 # --- パスワードリセット関連のルート ---
 @app.route('/forgot_password', methods=['GET', 'POST'])
@@ -524,8 +539,24 @@ def reset_password(token):
     return render_template('reset_password.html', token=token)
 
 
+# --- 運用系のルート ---
+@app.route('/health')
+def health_check():
+    """ヘルスチェック用のエンドポイント"""
+    return "OK", 200
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """汎用的なエラーハンドラ"""
+    app.logger.error(f"Unhandled exception: {e}", exc_info=True)
+    return jsonify(error="サーバー内部でエラーが発生しました。"), 500
+
+
 if __name__ == '__main__':
-    # 開発環境でのみ実行される
+    # このブロックは開発環境でのみ実行される
+    # Gunicornなどの本番サーバーで実行する際は、このブロックは無視される
+    
+    # 開発用のフォルダを作成
     if not os.path.exists('uploads'):
         os.makedirs('uploads')
     if not os.path.exists('static/thumbnails'):
@@ -536,6 +567,11 @@ if __name__ == '__main__':
         init_db()
 
     app.run(debug=True, host='0.0.0.0', port=5000)
+
+
+
+
+
 
 
 
