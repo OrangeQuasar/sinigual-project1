@@ -228,9 +228,12 @@ def home():
                 app.logger.error(f"S3署名付きURLの生成に失敗: {e}")
                 pdf['pdf_url'], pdf['thumbnail_url'] = '#', url_for('static', filename='placeholder.png')
         else:
+            # 開発環境用のURL生成
             pdf['pdf_url'] = url_for('uploaded_file', filepath=pdf['filename'])
             if pdf['thumbnail_filename']:
-                pdf['thumbnail_url'] = url_for('static', filename=f"{pdf['thumbnail_filename']}")
+                # 'thumbnails/1/abc.png' のようなパスを '1/abc.png' に変換して渡す
+                thumb_path = pdf['thumbnail_filename'].replace('thumbnails/', '', 1)
+                pdf['thumbnail_url'] = url_for('static_thumbnails', filepath=thumb_path)
             else:
                 pdf['thumbnail_url'] = url_for('static', filename='placeholder.png')
 
@@ -509,5 +512,6 @@ if __name__ == '__main__':
     if not os.environ.get('DATABASE_URL') and not os.path.exists('database.db'):
         init_db()
     app.run(debug=True, host='0.0.0.0', port=5000)
+
 
 
