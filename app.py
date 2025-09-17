@@ -6,16 +6,24 @@ import fitz  # PyMuPDF
 import boto3
 import re
 import uuid
+import logging
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_from_directory, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired
-import logging
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
+
+# PostgreSQLライブラリを試行的にインポート
+try:
+    import psycopg2
+    from psycopg2.extras import DictCursor
+except ImportError:
+    psycopg2 = None
+    DictCursor = None
 
 # .mjsファイル用のMIMEタイプをFlaskに教える
 mimetypes.add_type('application/javascript', '.mjs')
@@ -30,19 +38,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(mes
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 # --- AWSクライアントの初期化 ---
-# 環境変数が設定されているかチェック
-AWS_CONFIGURED = all(os.environ.get(key) for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_SENDER_EMAIL'])
+AWS_CONFIGURED = all(os.environ.get(key) for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'SES_SENDER_EMAIL', 'S3_BUCKET'])
 
 if AWS_CONFIGURED:
     ses_client = boto3.client('ses', region_name=os.environ.get('AWS_REGION'))
     s3_client = boto3.client('s3', region_name=os.environ.get('AWS_REGION'))
     SENDER_EMAIL = os.environ.get('SES_SENDER_EMAIL')
-    S3_BUCKET_PDF = os.environ.get('S3_BUCKET_PDF')
-    S3_BUCKET_THUMBNAILS = os.environ.get('S3_BUCKET_THUMBNAILS')
+    S3_BUCKET = os.environ.get('S3_BUCKET')
 else:
     print("警告: AWS設定が環境変数にありません。メール送信とS3アップロードは無効になります。")
     ses_client = None
     s3_client = None
+    S3_BUCKET = None
 
 # --- グローバル変数として定義 ---
 ALLOWED_EXTENSIONS = {'pdf'}
@@ -53,16 +60,15 @@ def get_db_connection():
     """データベースへの接続を確立する (PostgreSQL/SQLite対応)"""
     db_url = os.environ.get('DATABASE_URL')
     if db_url and db_url.startswith('postgres'):
-        # 本番環境: PostgreSQL
-        import psycopg2
-        from psycopg2.extras import DictCursor
+        if not psycopg2:
+            raise ImportError("DATABASE_URLが設定されていますが、psycopg2がインストールされていません。`pip install psycopg2-binary` を実行してください。")
         conn = psycopg2.connect(db_url)
-        conn.cursor_factory = DictCursor
+        # conn.cursor_factory は非推奨のため、cursor作成時に指定
+        return conn
     else:
-        # 開発環境: SQLite
         conn = sqlite3.connect('database.db')
         conn.row_factory = sqlite3.Row
-    return conn
+        return conn
 
 def allowed_file(filename):
     """許可されたファイル拡張子かチェックする"""
@@ -102,16 +108,15 @@ def send_email(recipient, subject, template, **kwargs):
             }
         )
     except ClientError as e:
-        print(f"メール送信エラー: {e.response['Error']['Message']}")
+        app.logger.error(f"メール送信エラー: {e.response['Error']['Message']}")
         return False
     else:
-        print(f"メール送信成功: Message ID: {response['MessageId']}")
+        app.logger.info(f"メール送信成功: Message ID: {response['MessageId']}")
         return True
 
 # --- データベース初期化 ---
 def init_db():
-    # PostgreSQLの場合は手動またはマイグレーションツールでテーブル作成を推奨
-    # ここではSQLite用の初期化コードを残す
+    # SQLite用の初期化コード
     conn = get_db_connection()
     if conn.__class__.__module__ == 'sqlite3':
         with conn:
@@ -154,34 +159,12 @@ def init_db():
 def home():
     """ホームページ。全てのPDFをリアクション付きで表示"""
     conn = get_db_connection()
-    cursor = conn.cursor()
+    is_postgres = conn.__class__.__module__ != 'sqlite3'
+    cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+    
     logged_in_user_id = session.get('user_id')
 
-    # SQLiteとPostgreSQLで文法が異なるため、条件分岐
-    if conn.__class__.__module__ == 'sqlite3':
-        sql = """
-            SELECT
-                p.id, p.title, p.filename, p.thumbnail_filename, u.username,
-                (
-                    SELECT '[' || GROUP_CONCAT(json_object('emoji', r.emoji, 'count', r.count)) || ']'
-                    FROM (
-                        SELECT emoji, COUNT(id) as count
-                        FROM reactions
-                        WHERE pdf_id = p.id
-                        GROUP BY emoji
-                    ) as r
-                ) as reactions,
-                (
-                    SELECT '[' || GROUP_CONCAT(json_quote(emoji)) || ']'
-                    FROM reactions
-                    WHERE pdf_id = p.id AND user_id = ?
-                ) as user_reactions
-            FROM pdfs p
-            JOIN users u ON p.user_id = u.id
-            ORDER BY p.id DESC
-        """
-        cursor.execute(sql, (logged_in_user_id,))
-    else: # PostgreSQL
+    if is_postgres:
         sql = """
             SELECT
                 p.id, p.title, p.filename, p.thumbnail_filename, u.username,
@@ -205,41 +188,56 @@ def home():
             ORDER BY p.id DESC
         """
         cursor.execute(sql, (logged_in_user_id,))
+    else: # SQLite
+        sql = """
+            SELECT
+                p.id, p.title, p.filename, p.thumbnail_filename, u.username,
+                (
+                    SELECT '[' || GROUP_CONCAT(json_object('emoji', r.emoji, 'count', r.count)) || ']'
+                    FROM (
+                        SELECT emoji, COUNT(id) as count FROM reactions WHERE pdf_id = p.id GROUP BY emoji
+                    ) as r
+                ) as reactions,
+                (
+                    SELECT '[' || GROUP_CONCAT(json_quote(emoji)) || ']'
+                    FROM reactions
+                    WHERE pdf_id = p.id AND user_id = ?
+                ) as user_reactions
+            FROM pdfs p
+            JOIN users u ON p.user_id = u.id
+            ORDER BY p.id DESC
+        """
+        cursor.execute(sql, (logged_in_user_id,))
     
     pdfs_raw = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    # URLを付与して最終的なリストを作成
     pdfs = []
     for row in pdfs_raw:
         pdf = dict(row)
         
-        # S3が設定されていればS3のURLを、なければローカルのURLを使用
-        if S3_BUCKET_PDF and s3_client:
-            aws_region = os.environ.get('AWS_REGION')
-            s3_pdf_base_url = f"https://{S3_BUCKET_PDF}.s3.{aws_region}.amazonaws.com/"
-            s3_thumb_base_url = f"https://{S3_BUCKET_THUMBNAILS}.s3.{aws_region}.amazonaws.com/"
-            
-            pdf['pdf_url'] = s3_pdf_base_url + pdf['filename']
-            if pdf['thumbnail_filename']:
-                pdf['thumbnail_url'] = s3_thumb_base_url + pdf['thumbnail_filename']
-            else:
-                pdf['thumbnail_url'] = url_for('static', filename='placeholder.png')
+        if s3_client and S3_BUCKET:
+            try:
+                pdf['pdf_url'] = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': pdf['filename']}, ExpiresIn=3600)
+                if pdf['thumbnail_filename']:
+                    pdf['thumbnail_url'] = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': pdf['thumbnail_filename']}, ExpiresIn=3600)
+                else:
+                    pdf['thumbnail_url'] = url_for('static', filename='placeholder.png')
+            except ClientError as e:
+                app.logger.error(f"S3署名付きURLの生成に失敗: {e}")
+                pdf['pdf_url'], pdf['thumbnail_url'] = '#', url_for('static', filename='placeholder.png')
         else:
-            # S3が未設定の場合 (開発環境)
-            pdf['pdf_url'] = url_for('uploaded_file', filename=pdf['filename'])
+            pdf['pdf_url'] = url_for('uploaded_file', filepath=pdf['filename'])
             if pdf['thumbnail_filename']:
-                pdf['thumbnail_url'] = url_for('static', filename=f"thumbnails/{pdf['thumbnail_filename']}")
+                pdf['thumbnail_url'] = url_for('static', filename=f"{pdf['thumbnail_filename']}")
             else:
                 pdf['thumbnail_url'] = url_for('static', filename='placeholder.png')
 
-        # SQLiteからのJSON文字列をパースする
         if isinstance(pdf.get('reactions'), str):
             pdf['reactions'] = json.loads(pdf['reactions']) if pdf['reactions'] else []
         if isinstance(pdf.get('user_reactions'), str):
             pdf['user_reactions'] = json.loads(pdf['user_reactions']) if pdf['user_reactions'] else []
-
         pdfs.append(pdf)
             
     return render_template('home.html', pdfs=pdfs)
@@ -251,9 +249,10 @@ def account():
         return redirect(url_for('login'))
     
     conn = get_db_connection()
-    cursor = conn.cursor()
-    # PostgreSQLとSQLiteでプレースホルダが異なる
-    placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+    is_postgres = conn.__class__.__module__ != 'sqlite3'
+    cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+    
+    placeholder = '%s' if is_postgres else '?'
     sql = f'SELECT id, title FROM pdfs WHERE user_id = {placeholder} ORDER BY id DESC'
     cursor.execute(sql, (session['user_id'],))
     user_pdfs = cursor.fetchall()
@@ -264,8 +263,7 @@ def account():
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
+    if 'user_id' not in session: return redirect(url_for('login'))
     
     file = request.files.get('file')
     title = request.form.get('title')
@@ -278,49 +276,39 @@ def upload_file():
         user_id_str = str(session['user_id'])
         file_extension = os.path.splitext(secure_filename(file.filename))[1]
         
-        # S3のキー（ファイルパス）を「ユーザーID/UUID」の形式で生成
-        filename_uuid = f"{user_id_str}/{uuid.uuid4().hex}{file_extension}"
-        thumbnail_filename_uuid = f"{user_id_str}/thumb_{uuid.uuid4().hex}.png"
+        filename_key = f"pdfs/{user_id_str}/{uuid.uuid4().hex}{file_extension}"
+        thumbnail_key = f"thumbnails/{user_id_str}/thumb_{uuid.uuid4().hex}.png"
 
         try:
-            # サムネイル生成
             with fitz.open(stream=file.read(), filetype="pdf") as doc:
                 page = doc.load_page(0)
                 pix = page.get_pixmap()
                 thumbnail_bytes = pix.tobytes("png")
 
-            # S3へアップロード
-            if s3_client and S3_BUCKET_PDF and S3_BUCKET_THUMBNAILS:
-                file.seek(0) # streamを先頭に戻す
-                s3_client.upload_fileobj(file, S3_BUCKET_PDF, filename_uuid)
-                s3_client.put_object(Body=thumbnail_bytes, Bucket=S3_BUCKET_THUMBNAILS, Key=thumbnail_filename_uuid, ContentType='image/png')
-            else:
-                # 開発用にローカルにも保存する場合
-                # ユーザーごとのディレクトリを作成
-                user_upload_dir = os.path.join('uploads', user_id_str)
-                user_thumb_dir = os.path.join('static/thumbnails', user_id_str)
-                os.makedirs(user_upload_dir, exist_ok=True)
-                os.makedirs(user_thumb_dir, exist_ok=True)
-
-                local_pdf_path = os.path.join('uploads', filename_uuid)
-                local_thumb_path = os.path.join('static/thumbnails', thumbnail_filename_uuid)
-                
+            if s3_client and S3_BUCKET:
                 file.seek(0)
-                with open(local_pdf_path, "wb") as f:
-                    f.write(file.read())
-                with open(local_thumb_path, "wb") as f:
-                    f.write(thumbnail_bytes)
+                s3_client.upload_fileobj(file, S3_BUCKET, filename_key)
+                s3_client.put_object(Body=thumbnail_bytes, Bucket=S3_BUCKET, Key=thumbnail_key, ContentType='image/png')
+            else:
+                for dir_path in ['uploads/pdfs', 'static/thumbnails']:
+                    os.makedirs(os.path.join(dir_path, user_id_str), exist_ok=True)
+                
+                local_pdf_path = os.path.join('uploads', filename_key)
+                local_thumb_path = os.path.join('static', thumbnail_key)
+                file.seek(0)
+                with open(local_pdf_path, "wb") as f: f.write(file.read())
+                with open(local_thumb_path, "wb") as f: f.write(thumbnail_bytes)
 
         except Exception as e:
             flash(f"ファイルの処理中にエラーが発生しました: {e}")
             return redirect(url_for('account'))
 
-        # データベースに保存
         conn = get_db_connection()
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
         cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+        placeholder = '%s' if is_postgres else '?'
         sql = f'INSERT INTO pdfs (title, filename, thumbnail_filename, user_id) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})'
-        cursor.execute(sql, (title, filename_uuid, thumbnail_filename_uuid, session['user_id']))
+        cursor.execute(sql, (title, filename_key, thumbnail_key, session['user_id']))
         conn.commit()
         cursor.close()
         conn.close()
@@ -330,24 +318,20 @@ def upload_file():
         
     return redirect(url_for('account'))
 
+# ... (react, ユーザー認証, パスワードリセットなどのルートは変更なし)
 @app.route('/react/<int:pdf_id>', methods=['POST'])
 def react(pdf_id):
-    if 'user_id' not in session:
-        return jsonify({'success': False, 'error': 'ログインが必要です'}), 401
-    
+    if 'user_id' not in session: return jsonify({'success': False, 'error': 'ログインが必要です'}), 401
     emoji = request.get_json().get('emoji')
-    if not emoji:
-        return jsonify({'success': False, 'error': '絵文字がありません'}), 400
-    
+    if not emoji: return jsonify({'success': False, 'error': '絵文字がありません'}), 400
     user_id = session['user_id']
     conn = get_db_connection()
-    cursor = conn.cursor()
-    placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
-
+    is_postgres = conn.__class__.__module__ != 'sqlite3'
+    cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+    placeholder = '%s' if is_postgres else '?'
     sql_select = f'SELECT id FROM reactions WHERE user_id = {placeholder} AND pdf_id = {placeholder} AND emoji = {placeholder}'
     cursor.execute(sql_select, (user_id, pdf_id, emoji))
     existing = cursor.fetchone()
-
     if existing:
         sql_delete = f'DELETE FROM reactions WHERE id = {placeholder}'
         cursor.execute(sql_delete, (existing['id'],))
@@ -356,68 +340,45 @@ def react(pdf_id):
         sql_insert = f'INSERT INTO reactions (user_id, pdf_id, emoji) VALUES ({placeholder}, {placeholder}, {placeholder})'
         cursor.execute(sql_insert, (user_id, pdf_id, emoji))
         action = 'added'
-    
     conn.commit()
-    
     sql_count = f'SELECT COUNT(id) as count FROM reactions WHERE pdf_id = {placeholder} AND emoji = {placeholder}'
     cursor.execute(sql_count, (pdf_id, emoji))
     count = cursor.fetchone()['count']
-    
     cursor.close()
     conn.close()
-    
     return jsonify({'success': True, 'action': action, 'emoji': emoji, 'count': count})
 
-# --- ユーザー認証とパスワードリセットのルート ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        password_confirm = request.form.get('password_confirm')
-        terms = request.form.get('terms')
-
+        username, email, password, password_confirm, terms = (request.form.get(k) for k in ['username', 'email', 'password', 'password_confirm', 'terms'])
         if not all([username, email, password, password_confirm]):
-            flash('すべてのフィールドを入力してください。')
-            return render_template('register.html')
+            flash('すべてのフィールドを入力してください。'); return render_template('register.html')
         if not terms:
-            flash('利用規約に同意する必要があります。')
-            return render_template('register.html')
+            flash('利用規約に同意する必要があります。'); return render_template('register.html')
         if password != password_confirm:
-            flash('パスワードが一致しません。')
-            return render_template('register.html')
-        
+            flash('パスワードが一致しません。'); return render_template('register.html')
         is_strong, message = is_password_strong(password)
         if not is_strong:
-            flash(message)
-            return render_template('register.html')
-        
+            flash(message); return render_template('register.html')
         conn = get_db_connection()
-        cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
-        
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
+        cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+        placeholder = '%s' if is_postgres else '?'
         sql_check = f'SELECT id FROM users WHERE username = {placeholder} OR email = {placeholder}'
         cursor.execute(sql_check, (username, email))
         if cursor.fetchone():
-            flash('そのユーザー名またはメールアドレスは既に使用されています。')
-            cursor.close()
-            conn.close()
-            return render_template('register.html')
-        
+            flash('そのユーザー名またはメールアドレスは既に使用されています。'); cursor.close(); conn.close(); return render_template('register.html')
         sql_insert = f'INSERT INTO users (username, email, password) VALUES ({placeholder}, {placeholder}, {placeholder})'
         cursor.execute(sql_insert, (username, email, generate_password_hash(password)))
         conn.commit()
         cursor.close()
         conn.close()
-
         token = s.dumps(email, salt='email-confirm')
         confirm_url = url_for('confirm_email', token=token, _external=True)
         send_email(email, "アカウントの有効化をお願いします", 'email/activate.html', confirm_url=confirm_url)
-        
         flash('確認メールを送信しました。メールボックスを確認してアカウントを有効化してください。')
         return redirect(url_for('login'))
-        
     return render_template('register.html')
 
 @app.route('/confirm_email/<token>')
@@ -425,8 +386,9 @@ def confirm_email(token):
     try:
         email = s.loads(token, salt='email-confirm', max_age=3600)
         conn = get_db_connection()
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
         cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+        placeholder = '%s' if is_postgres else '?'
         sql = f'UPDATE users SET email_verified = TRUE WHERE email = {placeholder}'
         cursor.execute(sql, (email,))
         conn.commit()
@@ -442,23 +404,20 @@ def confirm_email(token):
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
+        username, password = request.form.get('username'), request.form.get('password')
         conn = get_db_connection()
-        cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
+        cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+        placeholder = '%s' if is_postgres else '?'
         sql = f'SELECT * FROM users WHERE username = {placeholder}'
         cursor.execute(sql, (username,))
         user = cursor.fetchone()
         cursor.close()
         conn.close()
-
         if user and user['email_verified'] and check_password_hash(user['password'], password):
-            session['user_id'] = user['id']
-            session['username'] = user['username']
+            session['user_id'], session['username'] = user['id'], user['username']
             send_email(user['email'], "【重要】ログイン通知", 'email/login_alert.html', username=user['username'])
             return redirect(url_for('account'))
-        
         flash('ユーザー名、パスワードが正しくないか、アカウントが有効化されていません。')
     return render_template('login.html')
 
@@ -473,31 +432,31 @@ def terms():
 
 @app.route('/uploads/<path:filepath>')
 def uploaded_file(filepath):
-    # 本番環境ではS3から直接配信されるため、このルートは開発用
     return send_from_directory('uploads', filepath)
 
-# --- パスワードリセット関連のルート ---
+@app.route('/static/thumbnails/<path:filepath>')
+def static_thumbnails(filepath):
+    return send_from_directory('static/thumbnails', filepath)
+
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
         email = request.form.get('email')
         conn = get_db_connection()
-        cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
+        cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+        placeholder = '%s' if is_postgres else '?'
         sql = f'SELECT id FROM users WHERE email = {placeholder}'
         cursor.execute(sql, (email,))
         user = cursor.fetchone()
         cursor.close()
         conn.close()
-        
         if user:
             token = s.dumps(email, salt='password-reset')
             reset_url = url_for('reset_password', token=token, _external=True)
             send_email(email, "パスワードのリセット", 'email/reset_password.html', reset_url=reset_url)
-            
         flash('パスワードリセット用のメールを送信しました。メールアドレスが存在しない場合、メールは送信されません。')
         return redirect(url_for('login'))
-        
     return render_template('forgot_password.html')
 
 @app.route('/reset_password/<token>', methods=['GET', 'POST'])
@@ -507,37 +466,27 @@ def reset_password(token):
     except Exception:
         flash('パスワードリセットのリンクが無効か、有効期限が切れています。')
         return redirect(url_for('forgot_password'))
-    
     if request.method == 'POST':
-        password = request.form.get('password')
-        password_confirm = request.form.get('password_confirm')
-
+        password, password_confirm = request.form.get('password'), request.form.get('password_confirm')
         if not all([password, password_confirm]):
-            flash('新しいパスワードを入力してください。')
-            return render_template('reset_password.html', token=token)
+            flash('新しいパスワードを入力してください。'); return render_template('reset_password.html', token=token)
         if password != password_confirm:
-            flash('パスワードが一致しません。')
-            return render_template('reset_password.html', token=token)
-        
+            flash('パスワードが一致しません。'); return render_template('reset_password.html', token=token)
         is_strong, message = is_password_strong(password)
         if not is_strong:
-            flash(message)
-            return render_template('reset_password.html', token=token)
-        
+            flash(message); return render_template('reset_password.html', token=token)
         conn = get_db_connection()
+        is_postgres = conn.__class__.__module__ != 'sqlite3'
         cursor = conn.cursor()
-        placeholder = '%s' if conn.__class__.__module__ != 'sqlite3' else '?'
+        placeholder = '%s' if is_postgres else '?'
         sql = f'UPDATE users SET password = {placeholder} WHERE email = {placeholder}'
         cursor.execute(sql, (generate_password_hash(password), email))
         conn.commit()
         cursor.close()
         conn.close()
-        
         flash('パスワードが更新されました。新しいパスワードでログインしてください。')
         return redirect(url_for('login'))
-        
     return render_template('reset_password.html', token=token)
-
 
 # --- 運用系のルート ---
 @app.route('/health')
@@ -551,30 +500,9 @@ def handle_exception(e):
     app.logger.error(f"Unhandled exception: {e}", exc_info=True)
     return jsonify(error="サーバー内部でエラーが発生しました。"), 500
 
-
 if __name__ == '__main__':
-    # このブロックは開発環境でのみ実行される
-    # Gunicornなどの本番サーバーで実行する際は、このブロックは無視される
-    
-    # 開発用のフォルダを作成
-    if not os.path.exists('uploads'):
-        os.makedirs('uploads')
-    if not os.path.exists('static/thumbnails'):
-        os.makedirs('static/thumbnails')
-    
-    # データベースがない場合は初期化 (SQLite用)
+    # 開発環境でのみ実行される
     if not os.environ.get('DATABASE_URL') and not os.path.exists('database.db'):
         init_db()
-
     app.run(debug=True, host='0.0.0.0', port=5000)
-
-
-
-
-
-
-
-
-
-
 
