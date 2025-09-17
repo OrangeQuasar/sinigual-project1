@@ -239,7 +239,8 @@ def home():
         if isinstance(pdf.get('user_reactions'), str):
             pdf['user_reactions'] = json.loads(pdf['user_reactions']) if pdf['user_reactions'] else []
         pdfs.append(pdf)
-            
+    
+    app.logger.info(f"ホーム画面に {len(pdfs)} 件のPDFデータを渡します。")
     return render_template('home.html', pdfs=pdfs)
 
 @app.route('/account')
@@ -432,12 +433,15 @@ def terms():
 
 @app.route('/uploads/<path:filepath>')
 def uploaded_file(filepath):
+    # 本番環境ではS3から直接配信されるため、このルートは開発用
     return send_from_directory('uploads', filepath)
 
 @app.route('/static/thumbnails/<path:filepath>')
 def static_thumbnails(filepath):
-    return send_from_directory('static/thumbnails', filepath)
+    # 開発用にstatic/thumbnails以下のファイルにアクセスするためのルート
+    return send_from_directory(os.path.join('static', 'thumbnails'), filepath)
 
+# --- パスワードリセット関連のルート ---
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
@@ -505,4 +509,5 @@ if __name__ == '__main__':
     if not os.environ.get('DATABASE_URL') and not os.path.exists('database.db'):
         init_db()
     app.run(debug=True, host='0.0.0.0', port=5000)
+
 
