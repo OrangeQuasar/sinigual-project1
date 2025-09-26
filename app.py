@@ -2,11 +2,12 @@ import os
 import json
 import sqlite3
 import mimetypes
-import fitz  # PyMuPDF
+import fitz
 import boto3
 import re
 import uuid
 import logging
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_from_directory, jsonify
@@ -121,13 +122,15 @@ def init_db():
     if conn.__class__.__module__ == 'sqlite3':
         with conn:
             cursor = conn.cursor()
+            # usersテーブルに created_at カラムを追加
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
                     email TEXT NOT NULL UNIQUE,
                     password TEXT NOT NULL,
-                    email_verified BOOLEAN NOT NULL DEFAULT FALSE
+                    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             cursor.execute('''
@@ -151,64 +154,67 @@ def init_db():
                     UNIQUE(user_id, pdf_id, emoji)
                 )
             ''')
+            # comments テーブルを新しく作成
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    pdf_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    content TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id),
+                    FOREIGN KEY (pdf_id) REFERENCES pdfs (id),
+                    FOREIGN KEY (parent_id) REFERENCES comments (id)
+                )
+            ''')
     conn.close()
+
+# --- リクエスト前処理 (新規追加) ---
+@app.before_request
+def cleanup_unverified_users():
+    """1時間以上経過した未認証ユーザーを削除する"""
+    conn = get_db_connection()
+    is_postgres = conn.__class__.__module__ != 'sqlite3'
+    cursor = conn.cursor()
+    
+    if is_postgres:
+        threshold = datetime.utcnow() - timedelta(hours=1)
+        sql = "DELETE FROM users WHERE email_verified = FALSE AND created_at < %s"
+    else: # SQLite
+        threshold = datetime.now() - timedelta(hours=1)
+        sql = "DELETE FROM users WHERE email_verified = 0 AND created_at < ?"
+
+    try:
+        cursor.execute(sql, (threshold,))
+        conn.commit()
+        deleted_count = cursor.rowcount
+        if deleted_count > 0:
+            app.logger.info(f"{deleted_count} 件の未認証ユーザーを削除しました。")
+    except Exception as e:
+        app.logger.error(f"未認証ユーザーの削除中にエラーが発生しました: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
+        conn.close()
 
 # --- ルート定義 ---
 
 @app.route('/')
 def home():
-    """ホームページ。全てのPDFをリアクション付きで表示"""
+    """ホームページ。全てのPDFをリアクションなしで表示"""
     conn = get_db_connection()
     is_postgres = conn.__class__.__module__ != 'sqlite3'
     cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
     
-    logged_in_user_id = session.get('user_id')
-
-    if is_postgres:
-        sql = """
-            SELECT
-                p.id, p.title, p.filename, p.thumbnail_filename, u.username,
-                COALESCE(r.reactions, '[]'::json) as reactions,
-                COALESCE(ur.user_reactions, '[]'::json) as user_reactions
-            FROM pdfs p
-            JOIN users u ON p.user_id = u.id
-            LEFT JOIN (
-                SELECT pdf_id, json_agg(json_build_object('emoji', emoji, 'count', count)) as reactions
-                FROM (
-                    SELECT pdf_id, emoji, count(*) as count FROM reactions GROUP BY pdf_id, emoji
-                ) as counts
-                GROUP BY pdf_id
-            ) r ON p.id = r.pdf_id
-            LEFT JOIN (
-                SELECT pdf_id, json_agg(emoji) as user_reactions
-                FROM reactions
-                WHERE user_id = %s
-                GROUP BY pdf_id
-            ) ur ON p.id = ur.pdf_id
-            ORDER BY p.id DESC
-        """
-        cursor.execute(sql, (logged_in_user_id,))
-    else: # SQLite
-        sql = """
-            SELECT
-                p.id, p.title, p.filename, p.thumbnail_filename, u.username,
-                (
-                    SELECT '[' || GROUP_CONCAT(json_object('emoji', r.emoji, 'count', r.count)) || ']'
-                    FROM (
-                        SELECT emoji, COUNT(id) as count FROM reactions WHERE pdf_id = p.id GROUP BY emoji
-                    ) as r
-                ) as reactions,
-                (
-                    SELECT '[' || GROUP_CONCAT(json_quote(emoji)) || ']'
-                    FROM reactions
-                    WHERE pdf_id = p.id AND user_id = ?
-                ) as user_reactions
-            FROM pdfs p
-            JOIN users u ON p.user_id = u.id
-            ORDER BY p.id DESC
-        """
-        cursor.execute(sql, (logged_in_user_id,))
-    
+    # リアクション関連の複雑なSQLを削除
+    sql = """
+        SELECT p.id, p.title, p.filename, p.thumbnail_filename, u.username
+        FROM pdfs p
+        JOIN users u ON p.user_id = u.id
+        ORDER BY p.id DESC
+    """
+    cursor.execute(sql)
     pdfs_raw = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -216,7 +222,6 @@ def home():
     pdfs = []
     for row in pdfs_raw:
         pdf = dict(row)
-        
         if s3_client and S3_BUCKET:
             try:
                 pdf['pdf_url'] = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': pdf['filename']}, ExpiresIn=3600)
@@ -243,8 +248,90 @@ def home():
             pdf['user_reactions'] = json.loads(pdf['user_reactions']) if pdf['user_reactions'] else []
         pdfs.append(pdf)
     
-    app.logger.info(f"ホーム画面に {len(pdfs)} 件のPDFデータを渡します。")
     return render_template('home.html', pdfs=pdfs)
+
+# --- 新規追加: PDF詳細表示、コメント投稿 ---
+
+@app.route('/pdf/<int:pdf_id>')
+def view_pdf(pdf_id):
+    """PDF詳細ページ（ビューワー、リアクション、コメント）"""
+    conn = get_db_connection()
+    is_postgres = conn.__class__.__module__ != 'sqlite3'
+    cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+
+    # PDF情報を取得
+    placeholder = '%s' if is_postgres else '?'
+    cursor.execute(f"SELECT p.*, u.username FROM pdfs p JOIN users u ON p.user_id = u.id WHERE p.id = {placeholder}", (pdf_id,))
+    pdf_data = cursor.fetchone()
+
+    if not pdf_data:
+        flash('指定されたPDFは見つかりません。')
+        return redirect(url_for('home'))
+
+    pdf = dict(pdf_data)
+    # URL生成
+    if s3_client and S3_BUCKET:
+        pdf['pdf_url'] = s3_client.generate_presigned_url('get_object', Params={'Bucket': S3_BUCKET, 'Key': pdf['filename']}, ExpiresIn=3600)
+    else:
+        pdf['pdf_url'] = url_for('uploaded_file', filepath=pdf['filename'])
+
+    # リアクション情報を取得 (home()から移植)
+    logged_in_user_id = session.get('user_id')
+    sql_reactions = f"""
+        SELECT
+            (SELECT '[' || GROUP_CONCAT(json_object('emoji', r.emoji, 'count', r.count)) || ']'
+             FROM (SELECT emoji, COUNT(id) as count FROM reactions WHERE pdf_id = {placeholder} GROUP BY emoji) as r) as reactions,
+            (SELECT '[' || GROUP_CONCAT(json_quote(emoji)) || ']'
+             FROM reactions WHERE pdf_id = {placeholder} AND user_id = {placeholder}) as user_reactions
+    """
+    cursor.execute(sql_reactions, (pdf_id, pdf_id, logged_in_user_id))
+    reactions_data = cursor.fetchone()
+    pdf['reactions'] = json.loads(reactions_data['reactions']) if reactions_data and reactions_data['reactions'] else []
+    pdf['user_reactions'] = json.loads(reactions_data['user_reactions']) if reactions_data and reactions_data['user_reactions'] else []
+
+    # コメント情報を取得
+    sql_comments = f"""
+        SELECT c.id, c.content, c.parent_id, u.username, c.created_at
+        FROM comments c JOIN users u ON c.user_id = u.id
+        WHERE c.pdf_id = {placeholder} ORDER BY c.created_at ASC
+    """
+    cursor.execute(sql_comments, (pdf_id,))
+    comments_raw = cursor.fetchall()
+    
+    # コメントを階層化
+    comments = []
+    comment_map = {c['id']: dict(c) for c in comments_raw}
+    for cid, comment in comment_map.items():
+        comment['replies'] = []
+        if comment['parent_id'] in comment_map:
+            comment_map[comment['parent_id']]['replies'].append(comment)
+        else:
+            comments.append(comment)
+            
+    cursor.close()
+    conn.close()
+
+    return render_template('view_pdf.html', pdf=pdf, comments=comments)
+
+
+@app.route('/pdf/<int:pdf_id>/comment', methods=['POST'])
+def add_comment(pdf_id):
+    if 'user_id' not in session: return jsonify({'success': False, 'error': 'ログインが必要です'}), 401
+    
+    content = request.form.get('content')
+    parent_id = request.form.get('parent_id')
+    if not content:
+        flash('コメント内容を入力してください。'); return redirect(url_for('view_pdf', pdf_id=pdf_id))
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    sql = "INSERT INTO comments (user_id, pdf_id, parent_id, content, created_at) VALUES (?, ?, ?, ?, ?)"
+    cursor.execute(sql, (session['user_id'], pdf_id, parent_id or None, content, datetime.now()))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return redirect(url_for('view_pdf', pdf_id=pdf_id))
 
 @app.route('/account')
 def account():
@@ -355,34 +442,63 @@ def react(pdf_id):
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        username, email, password, password_confirm, terms = (request.form.get(k) for k in ['username', 'email', 'password', 'password_confirm', 'terms'])
+        # フォームからデータを取得
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        password_confirm = request.form.get('password_confirm')
+        terms = request.form.get('terms')
+
+        # バリデーションチェック
         if not all([username, email, password, password_confirm]):
-            flash('すべてのフィールドを入力してください。'); return render_template('register.html')
+            flash('すべてのフィールドを入力してください。')
+            return render_template('register.html')
         if not terms:
-            flash('利用規約に同意する必要があります。'); return render_template('register.html')
+            flash('利用規約に同意する必要があります。')
+            return render_template('register.html')
         if password != password_confirm:
-            flash('パスワードが一致しません。'); return render_template('register.html')
+            flash('パスワードが一致しません。')
+            return render_template('register.html')
+        
         is_strong, message = is_password_strong(password)
         if not is_strong:
-            flash(message); return render_template('register.html')
+            flash(message)
+            return render_template('register.html')
+
+        # データベースへの接続とユーザー重複チェック
         conn = get_db_connection()
         is_postgres = conn.__class__.__module__ != 'sqlite3'
-        cursor = conn.cursor(cursor_factory=DictCursor) if is_postgres else conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor if is_postgres else conn.cursor())
+        
         placeholder = '%s' if is_postgres else '?'
         sql_check = f'SELECT id FROM users WHERE username = {placeholder} OR email = {placeholder}'
         cursor.execute(sql_check, (username, email))
         if cursor.fetchone():
-            flash('そのユーザー名またはメールアドレスは既に使用されています。'); cursor.close(); conn.close(); return render_template('register.html')
-        sql_insert = f'INSERT INTO users (username, email, password) VALUES ({placeholder}, {placeholder}, {placeholder})'
-        cursor.execute(sql_insert, (username, email, generate_password_hash(password)))
+            flash('そのユーザー名またはメールアドレスは既に使用されています。')
+            cursor.close()
+            conn.close()
+            return render_template('register.html')
+
+        # ユーザーをデータベースに登録 (created_at を含める)
+        hashed_password = generate_password_hash(password)
+        now = datetime.utcnow() if is_postgres else datetime.now()
+        
+        sql_insert = f'INSERT INTO users (username, email, password, created_at) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder})'
+        cursor.execute(sql_insert, (username, email, hashed_password, now))
+        
         conn.commit()
         cursor.close()
         conn.close()
+
+        # 確認メールを送信
         token = s.dumps(email, salt='email-confirm')
         confirm_url = url_for('confirm_email', token=token, _external=True)
         send_email(email, "アカウントの有効化をお願いします", 'email/activate.html', confirm_url=confirm_url)
+        
         flash('確認メールを送信しました。メールボックスを確認してアカウントを有効化してください。')
         return redirect(url_for('login'))
+
+    # GETリクエストの場合は登録ページを表示
     return render_template('register.html')
 
 @app.route('/confirm_email/<token>')
@@ -508,7 +624,6 @@ def handle_exception(e):
     return jsonify(error="サーバー内部でエラーが発生しました。"), 500
 
 if __name__ == '__main__':
-    # 開発環境でのみ実行される
     if not os.environ.get('DATABASE_URL') and not os.path.exists('database.db'):
         init_db()
     app.run(debug=True, host='0.0.0.0', port=5000)

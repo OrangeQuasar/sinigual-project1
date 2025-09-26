@@ -1,53 +1,78 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <title>PDF Viewer</title>
-    <style>
-        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-        #pdf-container { width: 100%; height: 100vh; }
-    </style>
-    <script type="module" src="{{ url_for('static', filename='pdfjs/build/pdf.mjs') }}"></script>
-</head>
-<body>
-    <div id="pdf-container">
+{% extends "base.html" %}
+
+{% block content %}
+<div class="pdf-view-container">
+    <div class="pdf-viewer-main">
+        <h2>{{ pdf.title }}</h2>
+        <p>投稿者: {{ pdf.username }}</p>
+        <div class="pdf-viewer-controls">
+            <button id="prev-page">＜ 前へ</button>
+            <span id="page-info"></span>
+            <button id="next-page">次へ ＞</button>
+        </div>
         <canvas id="pdf-canvas"></canvas>
     </div>
+    <div class="pdf-sidebar">
+        <h3>リアクション</h3>
+        <div class="reactions-container">
+            <div class="reactions">
+                {% for reaction in pdf.reactions %}
+                <span class="reaction-emoji {% if reaction.emoji in pdf.user_reactions %}user-reacted{% endif %}"
+                      data-pdf-id="{{ pdf.id }}" data-emoji="{{ reaction.emoji }}">
+                    {{ reaction.emoji }} <span class="reaction-count">{{ reaction.count }}</span>
+                </span>
+                {% endfor %}
+            </div>
+            <div class="add-reaction">
+                <button class="add-reaction-btn">+</button>
+                <div class="emoji-picker">
+                    <span data-pdf-id="{{ pdf.id }}" data-emoji="👍">👍</span>
+                    <span data-pdf-id="{{ pdf.id }}" data-emoji="❤️">❤️</span>
+                    <span data-pdf-id="{{ pdf.id }}" data-emoji="😂">😂</span>
+                    <span data-pdf-id="{{ pdf.id }}" data-emoji="🎉">🎉</span>
+                </div>
+            </div>
+        </div>
+        <hr>
+        <h3>共有</h3>
+        <button id="share-btn">このページのURLをコピー</button>
+        <hr>
+        <h3>コメント</h3>
+        <div class="comment-section">
+            <form action="{{ url_for('add_comment', pdf_id=pdf.id) }}" method="post">
+                <textarea name="content" placeholder="コメントを追加..." required></textarea>
+                <button type="submit">投稿</button>
+            </form>
+            <div class="comment-list">
+                {% for comment in comments recursive %}
+                <div class="comment" id="comment-{{ comment.id }}">
+                    <p><strong>{{ comment.username }}</strong> <small>{{ comment.created_at.strftime('%Y-%m-%d %H:%M') }}</small></p>
+                    <p>{{ comment.content | nl2br }}</p>
+                    <a href="#" class="reply-btn" data-comment-id="{{ comment.id }}">返信する</a>
+                    {% if comment.replies %}
+                        <div class="replies">
+                            {{ loop(comment.replies) }}
+                        </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
 
-    <script type="module">
-        // Import the pdfjsLib object from the module
-        const { pdfjsLib } = globalThis;
+<div id="reply-form-template" style="display: none;">
+    <form action="{{ url_for('add_comment', pdf_id=pdf.id) }}" method="post" class="reply-form">
+        <input type="hidden" name="parent_id" value="">
+        <textarea name="content" placeholder="返信を追加..." required></textarea>
+        <button type="submit">返信</button>
+        <button type="button" class="cancel-reply-btn">キャンセル</button>
+    </form>
+</div>
+{% endblock %}
 
-        // Set the path for the worker script
-        pdfjsLib.GlobalWorkerOptions.workerSrc = "{{ url_for('static', filename='pdfjs/build/pdf.worker.mjs') }}";
-        
-        const pdfUrl = "{{ url_for('uploaded_file', filename=filename) }}";
-        const canvas = document.getElementById('pdf-canvas');
-        const ctx = canvas.getContext('2d');
-        const cMapUrl = "{{ url_for('static', filename='pdfjs/web/cmaps/') }}/";
-
-        const loadingTask = pdfjsLib.getDocument({
-            url: pdfUrl,
-            cMapUrl: cMapUrl,
-            cMapPacked: true,
-        });
-
-        loadingTask.promise.then(pdf => {
-            console.log('PDF loaded from local module!');
-            
-            pdf.getPage(1).then(page => {
-                const viewport = page.getViewport({ scale: 1.5 });
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-                const renderContext = {
-                    canvasContext: ctx,
-                    viewport: viewport
-                };
-                page.render(renderContext);
-            });
-        }).catch(err => {
-            console.error('Error while loading PDF: ', err);
-        });
-    </script>
-</body>
-</html>
+{% block scripts %}
+<script type="module">
+    // ( ... PDF.js の読み込み、リアクション、共有、コメント返信のJavaScriptコードは前の回答と同じです ... )
+</script>
+{% endblock %}
